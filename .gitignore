@@ -1,0 +1,9 @@
+*.csv
+*.pt
+*.h5
+*.zip
+*.rar
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.env
