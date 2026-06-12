@@ -1,48 +1,61 @@
+import uvicorn
 from fastapi import FastAPI
 import pandas as pd
+import warnings
+
+warnings.filterwarnings('ignore')
 
 app = FastAPI(title="Metro-PT3 Sensor Stream API")
 
-# 1. Tải dữ liệu vào bộ nhớ (Thực tế file này khá nặng ~1.5 triệu dòng)
 print("Đang tải dữ liệu, vui lòng đợi...")
-dataset_path = "MetroPT3.csv"
 try:
-    df = pd.read_csv(dataset_path)
-    print(f"Tải thành công! Tổng số dòng: {len(df)}")
-except FileNotFoundError:
-    print(f"Lỗi: Không tìm thấy file {dataset_path}. Vui lòng kiểm tra lại.")
-    df = pd.DataFrame()
+    df = pd.read_csv("MetroPT3.csv")
+    
+    # Ép kiểu datetime để dễ tìm kiếm chính xác
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.ffill().bfill()
+    total_rows = len(df)
+    
+    # -------------------------------------------------------------
+    # TUA NHANH ĐẾN ĐÚNG 1 PHÚT TRƯỚC KHI MÁY HỎNG THẬT
+    # Sự cố thật bắt đầu vào: 2020-04-18 00:00:00
+    # Ta bắt đầu phát từ:      2020-04-17 23:59:00
+    # -------------------------------------------------------------
+    error_time = pd.to_datetime('2020-04-17 23:59:00')
+    start_idx = df[df['timestamp'] >= error_time].index[0]
+    current_index = start_idx
+    
+    # Ép lại thành string cho API trả về JSON
+    df['timestamp'] = df['timestamp'].astype(str)
+    
+    print(f"-> Tải thành công {total_rows} dòng.")
+    print(f"-> ⏳ CỖ MÁY THỜI GIAN: Đã tua đến dòng {current_index} (Ngay trước khi hỏng).")
 
-# Biến toàn cục để theo dõi vị trí dòng dữ liệu đang đọc
-current_index = 0
+except Exception as e:
+    print(f"Lỗi hệ thống: {e}")
+    df = pd.DataFrame()
+    total_rows = 0
+    current_index = 0
 
 @app.get("/")
 def root():
-    return {"message": "API Giả lập Cảm biến Metro-PT3 đang hoạt động. Truy cập /stream để lấy dữ liệu."}
+    return {"message": "API Streaming đang hoạt động."}
 
 @app.get("/stream")
-def get_sensor_data(batch_size: int = 5):
-    """
-    Endpoint này trả về 'batch_size' dòng dữ liệu mỗi lần gọi.
-    Mặc định trả về 5 dòng/lần.
-    """
+def get_sensor_stream(batch_size: int = 5):
     global current_index
     
-    if df.empty:
-        return {"error": "Dataset chưa được tải."}
-
-    # Tính toán vị trí kết thúc của batch hiện tại
-    end_index = current_index + batch_size
-    
-    # Lấy dữ liệu
-    if end_index >= len(df):
-        # Nếu đã đọc đến cuối file, lấy phần còn lại và reset index về 0 để lặp lại
-        chunk = df.iloc[current_index : len(df)]
+    if df.empty or total_rows == 0:
+        return {"error": "Không có dữ liệu."}
+        
+    if current_index >= total_rows:
         current_index = 0
-    else:
-        # Lấy dữ liệu theo batch
-        chunk = df.iloc[current_index : end_index]
-        current_index = end_index
 
-    # Trả về định dạng JSON (danh sách các dictionary)
-    return chunk.to_dict(orient="records")  
+    # Lấy dữ liệu THỰC TẾ 100% từ lịch sử
+    batch = df.iloc[current_index : current_index + batch_size].copy()
+    current_index += batch_size
+    
+    return batch.to_dict(orient="records")
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
