@@ -86,6 +86,9 @@ def run_realtime_prediction():
         print("\nĐã tắt hệ thống dự đoán.")
     except Exception as e:
         print(f"Lỗi luồng: {e}")
-
+def save_to_db(timestamp, prediction):
+    # 'prediction' là kết quả AI (0: Bình thường, 1: Lỗi)
+    df_log = pd.DataFrame({'timestamp': [timestamp], 'is_anomaly': [prediction]})
+    df_log.to_sql('sensor_realtime_predictions', engine, if_exists='append', index=False)
 if __name__ == "__main__":
     run_realtime_prediction()
