@@ -1,87 +1,74 @@
 import uvicorn
 from fastapi import FastAPI
 import pandas as pd
-import random
 import warnings
 
 warnings.filterwarnings('ignore')
 
-app = FastAPI(title="Metro-PT3 Sensor Stream API")
-# uvicorn api_server:app 
-# 1. Tải dữ liệu vào bộ nhớ
-print("Đang tải dữ liệu, vui lòng đợi...")
+app = FastAPI(title="Metro-PT3 Realistic Replay API")
+
+print("Đang tải dữ liệu gốc (Vui lòng đợi vài giây)...")
 dataset_path = "MetroPT3.csv"
 try:
     df = pd.read_csv(dataset_path)
-    
-    # Ép kiểu timestamp về chuỗi và lấp đầy các ô trống để API không bị lỗi JSON
+    df['timestamp_dt'] = pd.to_datetime(df['timestamp']) # Cần cột datetime để tìm kiếm
     df['timestamp'] = df['timestamp'].astype(str)
     df = df.ffill().bfill() 
     
-    total_rows = len(df) # <-- FIX LỖI Ở ĐÂY: Đã định nghĩa total_rows
-    print(f"Tải thành công! Tổng số dòng: {total_rows}")
+    # --- TÌM VỊ TRÍ ĐỂ REPLAY (TRÁNH BIAS) ---
+    # Trong train_offline_lstm.py, chúng ta đã chia 80% đầu làm Train, 20% cuối làm Test.
+    # Sự kiện 18-04 nằm trong tập Train -> Mô hình đã "học thuộc" nó.
+    # Để test khách quan (không Bias), chúng ta phải dùng sự kiện cuối cùng: '2020-07-15 14:30:00' (nằm trong tập Test).
+    # Bắt đầu phát dữ liệu từ trước đó 20 phút (14:10:00)
+    start_replay_time = pd.to_datetime('2020-07-15 14:10:00')
+    
+    mask = df['timestamp_dt'] >= start_replay_time
+    if mask.any():
+        start_index = mask.idxmax()
+    else:
+        start_index = 0
+        
+    print(f"Tải thành công! Bắt đầu tua nhanh đến dòng: {start_index} (Thời gian: {df.iloc[start_index]['timestamp']})")
+    print(f"Lưu ý: Dữ liệu này nằm trong tập TEST, mô hình LSTM chưa từng nhìn thấy đoạn data này khi huấn luyện!")
     
 except FileNotFoundError:
-    print(f"Lỗi: Không tìm thấy file {dataset_path}. Vui lòng kiểm tra lại.")
+    print(f"Lỗi: Không tìm thấy file {dataset_path}.")
     df = pd.DataFrame()
-    total_rows = 0 # Đảm bảo total_rows tồn tại ngay cả khi lỗi đọc file
+    start_index = 0
 
-# Biến toàn cục để theo dõi vị trí dòng dữ liệu đang đọc
-current_index = 0
-is_leaking = False      # Trạng thái máy: Có đang rò rỉ không?
-leak_severity = 0.0     # Mức độ rò rỉ (từ 0.0 đến 1.0+)
+current_index = start_index
 
 @app.get("/")
 def root():
-    return {"message": "API Giả lập Cảm biến Metro-PT3 đang hoạt động. Truy cập /stream để lấy dữ liệu."}
+    return {"message": "API Giả lập Cảm biến (Chế độ Replay Dữ liệu thật) đang hoạt động. Truy cập /stream để lấy dữ liệu."}
 
 @app.get("/stream")
 def get_sensor_stream(batch_size: int = 5):
-    global current_index, is_leaking, leak_severity
+    global current_index
     
+    total_rows = len(df)
     if df.empty or total_rows == 0:
         return {"error": "Không có dữ liệu."}
         
     if current_index >= total_rows:
-        current_index = 0
+        current_index = start_index # Lặp lại từ đầu nếu hết data
 
     batch = df.iloc[current_index : current_index + batch_size].copy()
     current_index += batch_size
     
-    # -------------------------------------------------------------
-    # MÔ PHỎNG QUÁ TRÌNH SUY THOÁI TỰ NHIÊN (GRADUAL DEGRADATION)
-    # -------------------------------------------------------------
+    # Xoá cột timestamp_dt phụ trợ
+    batch = batch.drop(columns=['timestamp_dt'], errors='ignore')
     
-    # Xác suất 2% bắt đầu xuất hiện vết nứt nhỏ (Chỉ kích hoạt nếu đang bình thường)
-    if not is_leaking and random.random() < 0.02:
-        is_leaking = True
-        leak_severity = 0.0
-        print("\n[CƠ HỌC] ⚠️ Bắt đầu xuất hiện vết nứt ống khí. Khí đang rò rỉ chậm...")
-
-    # Nếu đang trong quá trình rò rỉ
-    if is_leaking:
-        # Tăng tốc độ hư hỏng (mỗi nhịp tồi tệ thêm 10% thay vì 5%)
-        leak_severity += 0.10 
-        
-        # 1. Ép áp suất tụt mạnh hơn (Tụt thẳng về 0 khi hỏng nặng)
-        batch['TP2'] = batch['TP2'] * (1 - leak_severity)
-        
-        # 2. Dòng điện và Nhiệt độ phải tăng vọt kịch trần
-        batch['Motor_current'] = batch['Motor_current'] + (leak_severity * 10.0)
-        batch['Oil_temperature'] = batch['Oil_temperature'] + (leak_severity * 20.0)
-        
-        # 3. Ép Van xả đóng hoàn toàn (Triệu chứng rõ nhất của rò khí)
-        batch['DV_pressure'] = 0.0 
-
-        # 4. ĐẶC BIỆT QUAN TRỌNG: Tạo độ rung lắc hỗn loạn cho H1 (Feature quan trọng thứ 2)
-        import numpy as np
-        batch['H1'] = batch['H1'] * np.random.uniform(0.2, 3.0, size=len(batch))
-
-        # Nếu hỏng quá nặng (vượt mức 1.0)
-        if leak_severity > 1.0:
-            print("[CƠ HỌC] 🔧 Kỹ sư đã can thiệp sửa chữa. Reset hệ thống về bình thường.\n")
-            is_leaking = False
-            leak_severity = 0.0
-    # -------------------------------------------------------------
+    # In cảnh báo ra Terminal của API để đối chiếu với Predictor
+    current_time = pd.to_datetime(batch.iloc[-1]['timestamp'])
+    
+    # Sự kiện Test Set: 2020-07-15 14:30:00
+    if pd.to_datetime('2020-07-15 14:30:00') <= current_time <= pd.to_datetime('2020-07-15 19:00:00'):
+        print(f"[{current_time}] ⚠️ [SỰ CỐ TEST SET] Đang phát lại dữ liệu lúc máy hỏng thật (Không có Bias)!")
+    else:
+        print(f"[{current_time}] 🟢 [Bình thường] Đang phát lại dữ liệu tốt.")
 
     return batch.to_dict(orient="records")
+
+if __name__ == "__main__":
+    uvicorn.run("api_server:app", host="127.0.0.1", port=8000, reload=True)
