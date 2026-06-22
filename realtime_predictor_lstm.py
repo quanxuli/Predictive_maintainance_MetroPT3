@@ -102,6 +102,13 @@ def run_realtime_prediction():
                     results_df = new_df.copy()
                     results_df['target'] = predictions
                     results_df['status'] = results_df['target'].apply(lambda x: 'Anomaly' if x == 1 else 'Normal')
+                    
+                    # Thêm Anomaly Score (dạng phần trăm) vào Database để hiển thị lên GUI
+                    anomaly_scores = np.zeros(num_new_rows, dtype=float)
+                    for idx, prob in zip(valid_indices, probs):
+                        anomaly_scores[idx] = prob * 100
+                    results_df['anomaly_score'] = anomaly_scores
+                    
                     results_df.to_sql('sensor_realtime_predictions', engine, if_exists='append', index=False)
 
                     # HIỂN THỊ CẢNH BÁO (KÈM XÁC SUẤT)
